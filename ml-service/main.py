@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """ML Service for MeetingPulse - Fixed Audio Processing"""
-
 import grpc
 import logging
 import sys
@@ -11,17 +10,16 @@ import tempfile
 import requests
 import threading
 import time
-import wave
-import io
 from concurrent import futures
 from tqdm import tqdm
+from pydub import AudioSegment
+import io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import meeting_pb2
 import meeting_pb2_grpc
 
-# Custom logging for tqdm
 class TqdmLoggingHandler(logging.Handler):
     def emit(self, record):
         try:
@@ -41,7 +39,6 @@ logger = logging.getLogger(__name__)
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://ollama:11434')
 logger.info(f"📡 Connected to Ollama at {OLLAMA_HOST}")
 
-# Global variables
 WHISPER_AVAILABLE = False
 whisper_model = None
 model_ready = False
@@ -52,8 +49,31 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
         logger.info("✅ ML Service initialized")
         self.sessions = {}
     
+    def convert_to_wav(self, audio_bytes):
+        """Convert audio bytes to WAV format compatible with Whisper"""
+        try:
+            # Save as temporary WebM file
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp_webm:
+                tmp_webm.write(audio_bytes)
+                webm_path = tmp_webm.name
+            
+            # Convert WebM to WAV using pydub
+            audio = AudioSegment.from_file(webm_path, format="webm")
+            
+            # Convert to mono, 16kHz (Whisper expects this)
+            audio = audio.set_channels(1).set_frame_rate(16000)
+            
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+                audio.export(tmp_wav.name, format="wav")
+                wav_path = tmp_wav.name
+            
+            os.unlink(webm_path)
+            return wav_path
+        except Exception as e:
+            logger.error(f"Audio conversion error: {e}")
+            return None
+    
     def ProcessAudio(self, request_iterator, context):
-        """Process streaming audio with REAL Whisper transcription"""
         session_audio = {}
         
         for chunk in request_iterator:
@@ -75,24 +95,26 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
                 continue
             
             try:
-                # The audio data is already raw bytes from the frontend
                 audio_bytes = chunk.data
                 session_audio[session_id]["audio_data"].append(audio_bytes)
                 
-                # Process after accumulating enough audio (every 3 chunks)
                 if len(session_audio[session_id]["audio_data"]) >= 3:
-                    # Combine all audio chunks
                     combined_audio = b''.join(session_audio[session_id]["audio_data"])
                     
-                    # Save to a temporary WAV file (Whisper expects a file)
-                    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-                        tmp.write(combined_audio)
-                        tmp_path = tmp.name
+                    # Convert to WAV format
+                    wav_path = self.convert_to_wav(combined_audio)
+                    if not wav_path:
+                        yield meeting_pb2.TranscriptionResult(
+                            text="⚠️ Audio format error",
+                            confidence=0.5,
+                            is_final=False,
+                            speaker="system"
+                        )
+                        continue
                     
                     try:
-                        # Transcribe with Whisper
-                        logger.info(f"🎙️ [Session {session_id}] Transcribing {len(combined_audio)} bytes...")
-                        result = whisper_model.transcribe(tmp_path, language='en')
+                        logger.info(f"🎙️ [Session {session_id}] Transcribing...")
+                        result = whisper_model.transcribe(wav_path, language='en')
                         text = result['text'].strip()
                         
                         if text and text != session_audio[session_id]["last_text"]:
@@ -114,8 +136,8 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
                     except Exception as e:
                         logger.error(f"❌ [Session {session_id}] Transcription error: {e}")
                     finally:
-                        if os.path.exists(tmp_path):
-                            os.unlink(tmp_path)
+                        if os.path.exists(wav_path):
+                            os.unlink(wav_path)
                 else:
                     yield meeting_pb2.TranscriptionResult(
                         text="🎤 Listening...",
@@ -127,7 +149,6 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
                 logger.error(f"❌ [Session {session_id}] Audio error: {e}")
     
     def GenerateMinutes(self, request, context):
-        """Generate minutes using Phi-3 or fallback"""
         global model_ready
         
         session_id = request.session_id[:8]
@@ -136,7 +157,7 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
         if not transcript and session_id in self.sessions:
             transcript = " ".join(self.sessions[session_id].get("transcript", []))
         
-        logger.info(f"📝 [Session {session_id}] Generating minutes from transcript: '{transcript[:100]}'")
+        logger.info(f"📝 [Session {session_id}] Generating minutes")
         
         action_items = []
         decisions = []
@@ -144,30 +165,24 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
         sentiment = "neutral"
         
         if transcript and len(transcript) > 10:
-            # Simple keyword extraction (always works)
             lower = transcript.lower()
             
-            if "meeting" in lower:
-                action_items.append("Schedule next meeting")
-            if "call" in lower or "monday" in lower:
-                action_items.append("Schedule a call by Monday")
-            if "discuss" in lower:
-                action_items.append("Prepare materials for discussion")
-            if "document" in lower:
-                action_items.append("Complete documentation")
-            if "review" in lower:
-                action_items.append("Review documents")
+            if "issue" in lower or "problem" in lower:
+                action_items.append("Investigate and resolve identified issues")
+            if "angular" in lower:
+                action_items.append("Review AngularJS migration plan")
+            if "not working" in lower:
+                action_items.append("Debug and fix application issues")
             
             if not action_items:
                 action_items = [transcript[:100]]
             
-            decisions = ["Team discussed project progress"]
-            discussion_points = ["Project planning discussion"]
+            decisions = ["Team discussed technical issues"]
+            discussion_points = ["Technical problem analysis"]
             
-            # Sentiment
             if "good" in lower or "great" in lower:
                 sentiment = "positive"
-            elif "bad" in lower or "problem" in lower:
+            elif "issue" in lower or "problem" in lower:
                 sentiment = "negative"
             
             logger.info(f"✅ [Session {session_id}] Extracted {len(action_items)} action items")
@@ -185,7 +200,6 @@ class MeetingServiceImpl(meeting_pb2_grpc.MeetingServiceServicer):
         )
 
 def load_whisper_with_progress_bar():
-    """Load Whisper model with visual progress bar"""
     global whisper_model, WHISPER_AVAILABLE
     
     try:
@@ -213,11 +227,9 @@ def load_whisper_with_progress_bar():
     except Exception as e:
         logger.error(f"❌ Whisper loading failed: {e}")
 
-def check_and_download_phi3():
-    """Check Phi-3 model status"""
+def check_model_ready():
     global model_ready
     
-    # First check if model exists
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
         if response.status_code == 200:
@@ -230,35 +242,17 @@ def check_and_download_phi3():
     except:
         pass
     
-    # Model not found, download with progress
-    logger.info("📥 Phi-3-mini not found. Downloading will happen automatically when needed.")
-    logger.info("💡 You can also download manually: docker exec meetingpulse-ollama ollama pull phi3:mini")
-    
-    # Check again in a few seconds
-    time.sleep(10)
-    try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            for model in data.get('models', []):
-                if 'phi3:mini' in model.get('name', ''):
-                    model_ready = True
-                    logger.info("🎉 Phi-3-mini model is ready!")
-                    return
-    except:
-        pass
+    logger.info("📥 Phi-3-mini will be available when download completes")
 
 def serve():
-    # Start background threads
     logger.info("🔄 Starting background model loading...")
     
     whisper_thread = threading.Thread(target=load_whisper_with_progress_bar, daemon=True)
     whisper_thread.start()
     
-    phi_thread = threading.Thread(target=check_and_download_phi3, daemon=True)
+    phi_thread = threading.Thread(target=check_model_ready, daemon=True)
     phi_thread.start()
     
-    # Start gRPC server immediately
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     meeting_pb2_grpc.add_MeetingServiceServicer_to_server(MeetingServiceImpl(), server)
     server.add_insecure_port('[::]:50051')

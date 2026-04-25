@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir numpy==1.24.3
 RUN pip install --no-cache-dir torch==2.0.1 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
 
 # Install Whisper and other dependencies
-RUN pip install --no-cache-dir openai-whisper requests grpcio grpcio-tools protobuf tqdm
+RUN pip install --no-cache-dir openai-whisper requests grpcio grpcio-tools protobuf tqdm pydub
 
 # Copy files
 COPY proto/ ./proto/

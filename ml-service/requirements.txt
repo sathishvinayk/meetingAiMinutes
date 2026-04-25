@@ -9,3 +9,4 @@ requests==2.31.0
 tiktoken
 more-itertools
 tqdm==4.66.1
+pydub==0.25.1

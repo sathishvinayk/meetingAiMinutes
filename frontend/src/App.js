@@ -6,7 +6,7 @@ function App() {
   const [transcript, setTranscript] = useState([]);
   const [actionItems, setActionItems] = useState([]);
   const [decisions, setDecisions] = useState([]);
-  const [discussionPoints, setDiscussionPoints] = useState([]);
+  const [, setDiscussionPoints] = useState([]);
   const [sentiment, setSentiment] = useState('neutral');
   const [sessionId, setSessionId] = useState(null);
   const [ws, setWs] = useState(null);
@@ -83,15 +83,14 @@ function App() {
   }, [addTranscriptMessage]);
 
   useEffect(() => {
-    connectWebSocket();
-    
+    const socket = connectWebSocket();
     return () => {
-      if (ws) ws.close();
+      if (socket) socket.close();
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [connectWebSocket]);
 
   const startRecording = async () => {
     try {
@@ -161,19 +160,16 @@ function App() {
   };
 
   const clearMeeting = () => {
-    // Clear all state
     setTranscript([]);
     setActionItems([]);
     setDecisions([]);
     setDiscussionPoints([]);
     setSentiment('neutral');
     
-    // Close current WebSocket and create a new session
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
     }
     
-    // Reconnect to get a fresh session
     setTimeout(() => {
       connectWebSocket();
     }, 500);
