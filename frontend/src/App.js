@@ -6,7 +6,7 @@ function App() {
   const [transcript, setTranscript] = useState([]);
   const [actionItems, setActionItems] = useState([]);
   const [decisions, setDecisions] = useState([]);
-  const [, setDiscussionPoints] = useState([]); // Fixed: prefixed with underscore to indicate intentional unused
+  const [discussionPoints, setDiscussionPoints] = useState([]);
   const [sentiment, setSentiment] = useState('neutral');
   const [sessionId, setSessionId] = useState(null);
   const [ws, setWs] = useState(null);
@@ -40,7 +40,7 @@ function App() {
         switch (data.type) {
           case 'session_init':
             setSessionId(data.session_id);
-            addTranscriptMessage('system', 'Session started');
+            addTranscriptMessage('system', 'New meeting session started');
             break;
             
           case 'transcription':
@@ -83,16 +83,15 @@ function App() {
   }, [addTranscriptMessage]);
 
   useEffect(() => {
-    let websocket = null;
     connectWebSocket();
     
     return () => {
-      if (websocket) websocket.close();
+      if (ws) ws.close();
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, [connectWebSocket]);
+  }, []);
 
   const startRecording = async () => {
     try {
@@ -100,17 +99,19 @@ function App() {
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 16000,
+          channelCount: 1
         }
       });
       
       streamRef.current = stream;
       
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+        mimeType: 'audio/webm'
       });
       
-      mediaRecorder.ondataavailable = (event) => {
+      mediaRecorder.ondataavailable = async (event) => {
         if (event.data.size > 0 && ws?.readyState === WebSocket.OPEN && sessionId) {
           const reader = new FileReader();
           reader.onload = () => {
@@ -128,11 +129,11 @@ function App() {
       mediaRecorder.start(3000);
       mediaRecorderRef.current = mediaRecorder;
       setIsRecording(true);
-      addTranscriptMessage('system', '🎙️ Recording started');
+      addTranscriptMessage('system', '🎙️ Recording started - Speak clearly');
       
     } catch (error) {
       console.error('Microphone error:', error);
-      alert('Please allow microphone access');
+      alert('Please allow microphone access to use MeetingPulse');
     }
   };
 
@@ -160,12 +161,24 @@ function App() {
   };
 
   const clearMeeting = () => {
+    // Clear all state
     setTranscript([]);
     setActionItems([]);
     setDecisions([]);
     setDiscussionPoints([]);
     setSentiment('neutral');
-    addTranscriptMessage('system', '🔄 Meeting cleared');
+    
+    // Close current WebSocket and create a new session
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
+    
+    // Reconnect to get a fresh session
+    setTimeout(() => {
+      connectWebSocket();
+    }, 500);
+    
+    addTranscriptMessage('system', '🔄 Meeting cleared. Ready for new meeting.');
   };
 
   const getSentimentEmoji = () => {

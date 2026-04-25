@@ -33,6 +33,7 @@ type Session struct {
 	StreamCtx   context.Context
 	CancelFunc  context.CancelFunc
 	StreamReady bool
+	Ending      bool
 }
 
 type Hub struct {
@@ -41,7 +42,6 @@ type Hub struct {
 	grpcConn  pb.MeetingServiceClient
 	grpcCC    *grpc.ClientConn
 	grpcReady bool
-	grpcMu    sync.RWMutex
 }
 
 func NewHub() *Hub {
@@ -50,7 +50,6 @@ func NewHub() *Hub {
 	var conn *grpc.ClientConn
 	var err error
 
-	// Try to connect with retries
 	for i := 0; i < 30; i++ {
 		conn, err = grpc.Dial("ml-service:50051",
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -105,7 +104,6 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 
 	log.Printf("✅ [%s] gRPC stream established to ML service", shortID)
 
-	// Receive transcriptions
 	go func(s *Session, sid string) {
 		for {
 			resp, err := s.Stream.Recv()
@@ -113,7 +111,9 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 				return
 			}
 			if err != nil {
-				log.Printf("⚠️ [%s] Stream receive error: %v", sid, err)
+				if !s.Ending {
+					log.Printf("⚠️ [%s] Stream receive error: %v", sid, err)
+				}
 				s.StreamReady = false
 				return
 			}
@@ -121,7 +121,7 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 			log.Printf("📝 [%s] ML Transcription: %s", sid, resp.Text)
 
 			s.mu.Lock()
-			if resp.IsFinal {
+			if resp.IsFinal && resp.Text != "🎤 Listening..." {
 				s.Transcript = append(s.Transcript, resp.Text)
 			}
 			s.mu.Unlock()
@@ -157,6 +157,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		ChunkCount:  0,
 		AudioBuffer: make([][]byte, 0),
 		StreamReady: false,
+		Ending:      false,
 	}
 
 	h.mu.Lock()
@@ -175,20 +176,17 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("👋 [%s] Session ended", shortID)
 	}()
 
-	// Send session init
 	conn.WriteJSON(map[string]interface{}{
 		"type":       "session_init",
 		"session_id": sessionID,
 	})
 
-	// Try to create stream immediately (may fail if ML not ready)
 	if h.grpcReady {
 		if err := h.createStream(session, shortID); err != nil {
 			log.Printf("⚠️ [%s] Initial stream creation failed: %v", shortID, err)
 		}
 	}
 
-	// Start a goroutine to retry stream creation if needed
 	go func() {
 		for i := 0; i < 20; i++ {
 			time.Sleep(2 * time.Second)
@@ -197,7 +195,6 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if h.grpcReady && session.Stream == nil {
 				if err := h.createStream(session, shortID); err == nil {
-					// Stream created successfully, send buffered audio
 					session.mu.Lock()
 					buffered := session.AudioBuffer
 					session.AudioBuffer = make([][]byte, 0)
@@ -238,21 +235,14 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					log.Printf("🎤 [%s] Audio chunk %d: %d bytes", shortID, session.ChunkCount, len(audioData))
 
-					if session.StreamReady && session.Stream != nil {
+					if session.StreamReady && session.Stream != nil && !session.Ending {
 						sequence++
-						err := session.Stream.Send(&pb.AudioChunk{
+						session.Stream.Send(&pb.AudioChunk{
 							Data:      audioData,
 							SessionId: sessionID,
 							Sequence:  sequence,
 						})
-						if err != nil {
-							log.Printf("❌ [%s] Failed to send audio: %v", shortID, err)
-							session.StreamReady = false
-							// Buffer for retry
-							session.AudioBuffer = append(session.AudioBuffer, audioData)
-						}
-					} else {
-						// Buffer audio for later
+					} else if !session.Ending {
 						session.AudioBuffer = append(session.AudioBuffer, audioData)
 						log.Printf("💾 [%s] Buffered audio chunk (total: %d)", shortID, len(session.AudioBuffer))
 					}
@@ -262,17 +252,23 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		case "end_meeting":
 			log.Printf("📝 [%s] Ending meeting, generating minutes...", shortID)
+			session.Ending = true
 
-			// Close stream
+			// Wait a moment for any pending transcriptions
+			time.Sleep(2 * time.Second)
+
 			if session.Stream != nil {
 				session.Stream.CloseSend()
 			}
 
-			// Build transcript
 			session.mu.Lock()
 			fullTranscript := ""
 			for _, text := range session.Transcript {
 				fullTranscript += text + " "
+			}
+			// Also check buffered audio transcript
+			if fullTranscript == "" && len(session.AudioBuffer) > 0 {
+				fullTranscript = "Audio received but not yet transcribed. Please speak clearly and try again."
 			}
 			session.mu.Unlock()
 
@@ -281,8 +277,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			var actionItems, decisions, discussionPoints []string
 			sentiment := "neutral"
 
-			// Try to get minutes from ML service
-			if h.grpcReady && len(fullTranscript) > 50 {
+			if h.grpcReady && len(fullTranscript) > 10 {
 				req := &pb.TranscriptRequest{
 					SessionId:  sessionID,
 					Transcript: fullTranscript,
@@ -299,15 +294,13 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// Fallback if no transcript
 			if len(actionItems) == 0 {
 				if len(session.Transcript) > 0 {
 					for _, t := range session.Transcript {
 						actionItems = append(actionItems, t[:min(100, len(t))])
 					}
-				}
-				if len(actionItems) == 0 {
-					actionItems = []string{"Speak during the meeting to generate action items"}
+				} else {
+					actionItems = []string{"No speech detected. Please ensure microphone works and speak clearly."}
 				}
 				decisions = []string{"No decisions recorded"}
 				discussionPoints = []string{"No discussion points recorded"}
