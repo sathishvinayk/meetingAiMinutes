@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package meeting;
+
+service MeetingService {
+    rpc ProcessAudio (stream AudioChunk) returns (stream TranscriptionResult);
+    rpc GenerateMinutes (TranscriptRequest) returns (MinutesResponse);
+}
+
+message AudioChunk {
+    bytes data = 1;
+    string session_id = 2;
+    int32 sequence = 3;
+}
+
+message TranscriptionResult {
+    string text = 1;
+    float confidence = 2;
+    bool is_final = 3;
+    string speaker = 4;
+}
+
+message TranscriptRequest {
+    string session_id = 1;
+    string transcript = 2;
+}
+
+message MinutesResponse {
+    repeated string action_items = 1;
+    repeated string decisions = 2;
+    repeated string discussion_points = 3;
+    string sentiment = 4;
+}

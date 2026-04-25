@@ -1,0 +1,56 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: meetingpulse-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    networks:
+      - meeting-network
+
+  ml-service:
+    build: ./ml-service
+    container_name: meetingpulse-ml
+    ports:
+      - "50051:50051"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+    restart: unless-stopped
+    networks:
+      - meeting-network
+
+  backend:
+    build: ./backend
+    container_name: meetingpulse-backend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - ml-service
+    restart: unless-stopped
+    networks:
+      - meeting-network
+
+  frontend:
+    build: ./frontend
+    container_name: meetingpulse-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - meeting-network
+
+networks:
+  meeting-network:
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local
