@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ type Session struct {
 	CancelFunc  context.CancelFunc
 	StreamReady bool
 	Ending      bool
+	Sequence    int32
 }
 
 type Hub struct {
@@ -108,6 +110,7 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 		for {
 			resp, err := s.Stream.Recv()
 			if err == io.EOF {
+				log.Printf("📭 [%s] Stream EOF received", sid)
 				return
 			}
 			if err != nil {
@@ -118,21 +121,26 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 				return
 			}
 
-			log.Printf("📝 [%s] ML Transcription: %s", sid, resp.Text)
+			log.Printf("📝 [%s] ML Transcription: '%s' (confidence: %.2f, final: %v)",
+				sid, resp.Text, resp.Confidence, resp.IsFinal)
 
 			s.mu.Lock()
-			if resp.IsFinal && resp.Text != "🎤 Listening..." {
+			if resp.IsFinal && resp.Text != "" && resp.Text != "🎤 Listening..." {
 				s.Transcript = append(s.Transcript, resp.Text)
+				log.Printf("✅ [%s] Added to transcript (total: %d entries)", sid, len(s.Transcript))
 			}
 			s.mu.Unlock()
 
-			s.Conn.WriteJSON(map[string]interface{}{
+			err = s.Conn.WriteJSON(map[string]interface{}{
 				"type":       "transcription",
 				"text":       resp.Text,
 				"speaker":    fmt.Sprintf("Speaker %d", resp.SpeakerId),
 				"confidence": resp.Confidence,
 				"is_final":   resp.IsFinal,
 			})
+			if err != nil {
+				log.Printf("❌ [%s] Failed to send transcription to client: %v", sid, err)
+			}
 		}
 	}(session, shortID)
 
@@ -142,13 +150,19 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket error: %v", err)
+		log.Printf("❌ WebSocket error: %v", err)
 		return
 	}
 	defer conn.Close()
 
 	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
 	shortID := sessionID[len(sessionID)-8:]
+
+	log.Printf("============================================================")
+	log.Printf("📱 [%s] NEW SESSION CREATED", shortID)
+	log.Printf("   Full Session ID: %s", sessionID)
+	log.Printf("   Time: %v", time.Now())
+	log.Printf("============================================================")
 
 	session := &Session{
 		ID:          sessionID,
@@ -158,28 +172,23 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		AudioBuffer: make([][]byte, 0),
 		StreamReady: false,
 		Ending:      false,
+		Sequence:    0,
 	}
 
 	h.mu.Lock()
 	h.sessions[sessionID] = session
 	h.mu.Unlock()
 
-	log.Printf("📱 [%s] New session started", shortID)
-
-	defer func() {
-		if session.CancelFunc != nil {
-			session.CancelFunc()
-		}
-		h.mu.Lock()
-		delete(h.sessions, sessionID)
-		h.mu.Unlock()
-		log.Printf("👋 [%s] Session ended", shortID)
-	}()
-
-	conn.WriteJSON(map[string]interface{}{
+	// Send session init with FULL ID
+	initMsg := map[string]interface{}{
 		"type":       "session_init",
 		"session_id": sessionID,
-	})
+	}
+	if err := conn.WriteJSON(initMsg); err != nil {
+		log.Printf("❌ [%s] Failed to send session init: %v", shortID, err)
+		return
+	}
+	log.Printf("✅ [%s] Session init sent with ID: %s", shortID, sessionID)
 
 	if h.grpcReady {
 		if err := h.createStream(session, shortID); err != nil {
@@ -187,6 +196,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Stream recovery goroutine
 	go func() {
 		for i := 0; i < 20; i++ {
 			time.Sleep(2 * time.Second)
@@ -194,20 +204,24 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if h.grpcReady && session.Stream == nil {
+				log.Printf("🔄 [%s] Attempting to recover stream (attempt %d)", shortID, i+1)
 				if err := h.createStream(session, shortID); err == nil {
 					session.mu.Lock()
 					buffered := session.AudioBuffer
 					session.AudioBuffer = make([][]byte, 0)
-					seq := int32(0)
+					session.mu.Unlock()
+
 					for _, audio := range buffered {
-						seq++
-						session.Stream.Send(&pb.AudioChunk{
+						session.Sequence++
+						err := session.Stream.Send(&pb.AudioChunk{
 							Data:      audio,
 							SessionId: sessionID,
-							Sequence:  seq,
+							Sequence:  session.Sequence,
 						})
+						if err != nil {
+							log.Printf("❌ [%s] Failed to send buffered chunk: %v", shortID, err)
+						}
 					}
-					session.mu.Unlock()
 					log.Printf("✅ [%s] Stream recovered, sent %d buffered chunks", shortID, len(buffered))
 					return
 				}
@@ -216,68 +230,102 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("⚠️ [%s] Could not establish gRPC stream after retries", shortID)
 	}()
 
-	sequence := int32(0)
-
 	for {
 		var msg map[string]interface{}
 		err := conn.ReadJSON(&msg)
 		if err != nil {
+			log.Printf("❌ [%s] WebSocket read error: %v", shortID, err)
 			break
 		}
 
-		switch msg["type"] {
+		msgType, ok := msg["type"].(string)
+		if !ok {
+			log.Printf("⚠️ [%s] Received message without type field", shortID)
+			continue
+		}
+
+		log.Printf("📨 [%s] Received message type: %s", shortID, msgType)
+
+		switch msgType {
 		case "audio_chunk":
 			session.mu.Lock()
 			session.ChunkCount++
 
+			msgSessionID, _ := msg["session_id"].(string)
+			log.Printf("🎤 [%s] Audio chunk %d received", shortID, session.ChunkCount)
+			log.Printf("   Message session_id: '%s'", msgSessionID)
+			log.Printf("   Expected session_id: '%s'", sessionID)
+			log.Printf("   Match: %v", msgSessionID == sessionID)
+
 			if data, ok := msg["data"].(string); ok && data != "" {
 				audioData, err := base64.StdEncoding.DecodeString(data)
 				if err == nil {
-					log.Printf("🎤 [%s] Audio chunk %d: %d bytes", shortID, session.ChunkCount, len(audioData))
+					log.Printf("   Audio size: %d bytes", len(audioData))
+					if len(audioData) > 4 {
+						log.Printf("   First 20 bytes (hex): %x", audioData[:min(20, len(audioData))])
+						// Detect audio format
+						if len(audioData) > 4 {
+							if audioData[0] == 0x1a && audioData[1] == 0x45 {
+								log.Printf("   Format: WebM/Matroska detected")
+							} else if audioData[0] == 0x66 && audioData[1] == 0x74 {
+								log.Printf("   Format: MP4/M4A detected")
+							} else if audioData[0] == 0x52 && audioData[1] == 0x49 {
+								log.Printf("   Format: WAV detected")
+							} else {
+								log.Printf("   Format: Unknown/RAW")
+							}
+						}
+					}
 
 					if session.StreamReady && session.Stream != nil && !session.Ending {
-						sequence++
-						session.Stream.Send(&pb.AudioChunk{
+						session.Sequence++
+						err := session.Stream.Send(&pb.AudioChunk{
 							Data:      audioData,
 							SessionId: sessionID,
-							Sequence:  sequence,
+							Sequence:  session.Sequence,
 						})
-					} else if !session.Ending {
+						if err != nil {
+							log.Printf("❌ [%s] Failed to send chunk to ML: %v", shortID, err)
+						} else {
+							log.Printf("✅ [%s] Chunk %d sent to ML service", shortID, session.Sequence)
+						}
+					} else {
+						log.Printf("💾 [%s] Buffering chunk (StreamReady=%v, Ending=%v)",
+							shortID, session.StreamReady, session.Ending)
 						session.AudioBuffer = append(session.AudioBuffer, audioData)
-						log.Printf("💾 [%s] Buffered audio chunk (total: %d)", shortID, len(session.AudioBuffer))
+						log.Printf("   Buffer now has %d chunks total", len(session.AudioBuffer))
 					}
+				} else {
+					log.Printf("❌ [%s] Base64 decode error: %v", shortID, err)
 				}
+			} else {
+				log.Printf("⚠️ [%s] No data field in audio_chunk", shortID)
 			}
 			session.mu.Unlock()
 
 		case "end_meeting":
-			log.Printf("📝 [%s] Ending meeting, generating minutes...", shortID)
+			log.Printf("🏁 [%s] End meeting signal received", shortID)
 			session.Ending = true
 
-			// Wait a moment for any pending transcriptions
+			// Wait for pending transcriptions
+			log.Printf("⏳ [%s] Waiting 2 seconds for final transcriptions...", shortID)
 			time.Sleep(2 * time.Second)
 
 			if session.Stream != nil {
 				session.Stream.CloseSend()
+				log.Printf("📤 [%s] Closed gRPC send stream", shortID)
 			}
 
 			session.mu.Lock()
-			fullTranscript := ""
-			for _, text := range session.Transcript {
-				fullTranscript += text + " "
-			}
-			// Also check buffered audio transcript
-			if fullTranscript == "" && len(session.AudioBuffer) > 0 {
-				fullTranscript = "Audio received but not yet transcribed. Please speak clearly and try again."
-			}
+			fullTranscript := strings.Join(session.Transcript, " ")
+			log.Printf("📄 [%s] Full transcript (%d entries): '%s'", shortID, len(session.Transcript), fullTranscript)
 			session.mu.Unlock()
-
-			log.Printf("📄 [%s] Full transcript: %s", shortID, fullTranscript[:min(200, len(fullTranscript))])
 
 			var actionItems, decisions, discussionPoints []string
 			sentiment := "neutral"
 
 			if h.grpcReady && len(fullTranscript) > 10 {
+				log.Printf("🤖 [%s] Calling GenerateMinutes with transcript length %d", shortID, len(fullTranscript))
 				req := &pb.TranscriptRequest{
 					SessionId:  sessionID,
 					Transcript: fullTranscript,
@@ -290,14 +338,23 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					decisions = resp.Decisions
 					discussionPoints = resp.DiscussionPoints
 					sentiment = resp.Sentiment
-					log.Printf("✅ [%s] Received minutes from ML service", shortID)
+					log.Printf("✅ [%s] Received minutes: %d action items, %d decisions",
+						shortID, len(actionItems), len(decisions))
 				}
+			} else {
+				log.Printf("⚠️ [%s] Cannot generate minutes: grpcReady=%v, transcript_len=%d",
+					shortID, h.grpcReady, len(fullTranscript))
 			}
 
 			if len(actionItems) == 0 {
+				log.Printf("⚠️ [%s] No action items found, using fallback", shortID)
 				if len(session.Transcript) > 0 {
 					for _, t := range session.Transcript {
-						actionItems = append(actionItems, t[:min(100, len(t))])
+						shortText := t
+						if len(shortText) > 100 {
+							shortText = shortText[:100]
+						}
+						actionItems = append(actionItems, shortText)
 					}
 				} else {
 					actionItems = []string{"No speech detected. Please ensure microphone works and speak clearly."}
@@ -306,7 +363,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				discussionPoints = []string{"No discussion points recorded"}
 			}
 
-			conn.WriteJSON(map[string]interface{}{
+			minutesMsg := map[string]interface{}{
 				"type": "minutes",
 				"payload": map[string]interface{}{
 					"action_items":      actionItems,
@@ -314,10 +371,22 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					"discussion_points": discussionPoints,
 					"sentiment":         sentiment,
 				},
-			})
-			log.Printf("✅ [%s] Minutes sent to client", shortID)
+			}
+
+			log.Printf("📤 [%s] Sending minutes to client: %v", shortID, minutesMsg)
+
+			if err := conn.WriteJSON(minutesMsg); err != nil {
+				log.Printf("❌ [%s] Failed to send minutes: %v", shortID, err)
+			} else {
+				log.Printf("✅ [%s] Minutes sent successfully to client", shortID)
+			}
 		}
 	}
+
+	h.mu.Lock()
+	delete(h.sessions, sessionID)
+	h.mu.Unlock()
+	log.Printf("👋 [%s] Session cleaned up", shortID)
 }
 
 func min(a, b int) int {
