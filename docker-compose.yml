@@ -1,7 +1,7 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: meetingpulse-ollama
+    container_name: meetingAiHackathon-ollama
     ports:
       - "11434:11434"
     volumes:
@@ -15,7 +15,7 @@ services:
 
   ml-service:
     build: ./ml-service
-    container_name: meetingpulse-ml
+    container_name: meetingAiHackathon-ml
     ports:
       - "50051:50051"
     environment:
@@ -28,7 +28,7 @@ services:
 
   backend:
     build: ./backend
-    container_name: meetingpulse-backend
+    container_name: meetingAiHackathon-backend
     ports:
       - "8080:8080"
     depends_on:
@@ -39,7 +39,7 @@ services:
 
   frontend:
     build: ./frontend
-    container_name: meetingpulse-frontend
+    container_name: meetingAiHackathon-frontend
     ports:
       - "3000:3000"
     depends_on:

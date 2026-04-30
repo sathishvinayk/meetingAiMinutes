@@ -6,18 +6,20 @@ function App() {
   const [transcript, setTranscript] = useState([]);
   const [actionItems, setActionItems] = useState([]);
   const [decisions, setDecisions] = useState([]);
-  const [, setDiscussionPoints] = useState([]);
+  const [discussionPoints, setDiscussionPoints] = useState([]);
   const [sentiment, setSentiment] = useState('neutral');
   const [sessionId, setSessionId] = useState(null);
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [micError, setMicError] = useState(null);
+  const [volume, setVolume] = useState(0);
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const recordingStartTimeRef = useRef(null);
   const chunkNumberRef = useRef(0);
-  const isRecordingRef = useRef(false); // Use ref to avoid closure issues
+  const isRecordingRef = useRef(false);
+  const volumeIntervalRef = useRef(null);
 
   const addTranscriptMessage = useCallback((speaker, text) => {
     setTranscript(prev => [...prev, {
@@ -28,70 +30,68 @@ function App() {
     }]);
   }, []);
 
-  // In your App component, update the WebSocket handler
-const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const websocket = new WebSocket(`${protocol}//localhost:8080/ws`);
     
     websocket.onopen = () => {
-        console.log('✅ WebSocket connected');
-        setIsConnected(true);
-        setMicError(null);
+      console.log('✅ WebSocket connected, waiting for session_id...');
+      setIsConnected(true);
+      setMicError(null);
     };
     
     websocket.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            console.log('📨 Full message received:', JSON.stringify(data, null, 2));
+      try {
+        const data = JSON.parse(event.data);
+        console.log('📨 Received message:', data.type);
+        
+        switch (data.type) {
+          case 'session_init':
+            const newSessionId = data.session_id;
+            setSessionId(newSessionId);
+            console.log('🎯 Session initialized with ID:', newSessionId);
+            addTranscriptMessage('system', `✅ Ready! Session: ${newSessionId.slice(-8)}`);
+            break;
             
-            switch (data.type) {
-                case 'session_init':
-                    const newSessionId = data.session_id;
-                    setSessionId(newSessionId);
-                    console.log('🎯 Session initialized with ID:', newSessionId);
-                    addTranscriptMessage('system', `New meeting session started: ${newSessionId.slice(-8)}`);
-                    break;
-                    
-                case 'transcription':
-                    console.log('📝 Transcription received:', data.text);
-                    addTranscriptMessage(data.speaker || 'speaker', data.text);
-                    break;
-                    
-                case 'minutes':
-                    if (data.payload) {
-                        console.log('📊 Minutes received:', data.payload);
-                        setActionItems(data.payload.action_items || []);
-                        setDecisions(data.payload.decisions || []);
-                        setDiscussionPoints(data.payload.discussion_points || []);
-                        setSentiment(data.payload.sentiment || 'neutral');
-                        setIsGenerating(false);
-                        addTranscriptMessage('system', '✅ Meeting minutes generated!');
-                    }
-                    break;
-                    
-                default:
-                    console.log('Unknown message type:', data.type);
+          case 'transcription':
+            console.log('📝 Transcription:', data.text);
+            addTranscriptMessage(data.speaker || 'speaker', data.text);
+            break;
+            
+          case 'minutes':
+            if (data.payload) {
+              console.log('📊 Minutes received:', data.payload);
+              setActionItems(data.payload.action_items || []);
+              setDecisions(data.payload.decisions || []);
+              setDiscussionPoints(data.payload.discussion_points || []);
+              setSentiment(data.payload.sentiment || 'neutral');
+              setIsGenerating(false);
+              addTranscriptMessage('system', '✅ Meeting minutes generated!');
             }
-        } catch (error) {
-            console.error('Parse error:', error);
+            break;
+            
+          default:
+            console.log('Unknown message type:', data.type);
         }
+      } catch (error) {
+        console.error('Parse error:', error);
+      }
     };
     
     websocket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setIsConnected(false);
+      console.error('WebSocket error:', error);
+      setIsConnected(false);
     };
     
-    websocket.onclose = () => {
-        console.log('WebSocket disconnected');
-        setIsConnected(false);
-        // Reconnect after 3 seconds
-        setTimeout(() => connectWebSocket(), 3000);
+    websocket.onclose = (event) => {
+      console.log('WebSocket disconnected:', event.code, event.reason);
+      setIsConnected(false);
+      setTimeout(() => connectWebSocket(), 3000);
     };
     
     setWs(websocket);
     return websocket;
-}, [addTranscriptMessage]);
+  }, [addTranscriptMessage]);
 
   useEffect(() => {
     const socket = connectWebSocket();
@@ -100,6 +100,9 @@ const connectWebSocket = useCallback(() => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
+      if (volumeIntervalRef.current) {
+        clearInterval(volumeIntervalRef.current);
+      }
     };
   }, [connectWebSocket]);
 
@@ -107,136 +110,185 @@ const connectWebSocket = useCallback(() => {
     setMicError(null);
     chunkNumberRef.current = 0;
     
+    console.log('🎤 startRecording called, sessionId:', sessionId);
+    console.log('WebSocket state:', ws?.readyState);
+    
+    if (!sessionId) {
+      console.error('❌ No session ID! Wait for WebSocket connection.');
+      addTranscriptMessage('system', '❌ Waiting for connection... Please try again.');
+      return;
+    }
+    
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-            audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-                channelCount: 1,
-                sampleRate: 16000
-            }
-        });
-        
-        streamRef.current = stream;
-        
-        // Use a consistent format - force WebM throughout
-        let mimeType = 'audio/webm';
-        if (!MediaRecorder.isTypeSupported('audio/webm')) {
-            mimeType = 'audio/mp4';
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 16000
         }
+      });
+      
+      console.log('✅ Microphone stream obtained');
+      streamRef.current = stream;
+      
+      // Setup volume meter
+      const audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      
+      if (volumeIntervalRef.current) clearInterval(volumeIntervalRef.current);
+      volumeIntervalRef.current = setInterval(() => {
+        analyser.getByteTimeDomainData(dataArray);
+        let max = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const v = (dataArray[i] - 128) / 128;
+          max = Math.max(max, Math.abs(v));
+        }
+        setVolume(max);
+      }, 100);
+      
+      // Check available MIME types
+      const mimeTypes = ['audio/webm', 'audio/webm;codecs=opus', 'audio/mp4', 'audio/mpeg'];
+      let mimeType = '';
+      for (const type of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          mimeType = type;
+          break;
+        }
+      }
+      
+      console.log('Using MIME type:', mimeType || 'default');
+      
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: mimeType,
+        audioBitsPerSecond: 64000  // Higher quality for better transcription
+      });
+      
+      // Set up data handler BEFORE starting
+      mediaRecorder.ondataavailable = (event) => {
+        console.log(`📊 Data available event: size=${event.data.size}, state=${mediaRecorder.state}`);
         
-        console.log('Using MIME type:', mimeType);
-        
-        const mediaRecorder = new MediaRecorder(stream, {
-            mimeType: mimeType,
-            audioBitsPerSecond: 128000
-        });
-        
-        // Collect ALL chunks and combine them
-        let allChunks = [];
-        
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0 && ws?.readyState === WebSocket.OPEN && sessionId) {
-              chunkNumberRef.current++;
-              console.log(`📤 Sending chunk ${chunkNumberRef.current}, size: ${event.data.size}, session: ${sessionId}`);
-              
-              const reader = new FileReader();
-              reader.onload = () => {
-                  const base64Data = reader.result.split(',')[1];
-                  const audioMsg = {
-                      type: 'audio_chunk',
-                      session_id: sessionId,  // Use the current session ID
-                      data: base64Data,
-                      chunk: chunkNumberRef.current,
-                      size: event.data.size,
-                      timestamp: Date.now()
-                  };
-                  ws.send(JSON.stringify(audioMsg));
-              };
-              reader.readAsDataURL(event.data);
-          }
-      };
-        
-        mediaRecorder.onstop = async () => {
-            console.log(`🎬 Recording stopped. Total chunks: ${allChunks.length}`);
+        if (event.data.size > 0) {
+          console.log(`✅ Got audio data: ${event.data.size} bytes`);
+          
+          if (ws?.readyState === WebSocket.OPEN && sessionId && isRecordingRef.current) {
+            chunkNumberRef.current++;
+            console.log(`📤 Sending chunk ${chunkNumberRef.current}, size: ${event.data.size}`);
             
-            if (allChunks.length === 0) {
-                console.error('No audio chunks collected');
-                return;
-            }
-            
-            // Combine all chunks into a single blob
-            const fullAudioBlob = new Blob(allChunks, { type: mimeType });
-            console.log(`📦 Combined audio: ${fullAudioBlob.size} bytes`);
-            
-            // Convert to base64 and send as a single chunk
             const reader = new FileReader();
             reader.onload = () => {
-                const base64Data = reader.result.split(',')[1];
-                if (ws?.readyState === WebSocket.OPEN && sessionId) {
-                    ws.send(JSON.stringify({
-                        type: 'audio_chunk',
-                        session_id: sessionId,
-                        data: base64Data,
-                        chunk: 1,
-                        size: fullAudioBlob.size,
-                        is_final: true
-                    }));
-                    console.log(`📤 Sent complete audio (${fullAudioBlob.size} bytes)`);
-                }
+              const base64Data = reader.result.split(',')[1];
+              const message = {
+                type: 'audio_chunk',
+                session_id: sessionId,
+                data: base64Data,
+                chunk: chunkNumberRef.current,
+                size: event.data.size,
+                timestamp: Date.now()
+              };
+              console.log(`📨 Sending message type: ${message.type}, chunk: ${message.chunk}`);
+              ws.send(JSON.stringify(message));
             };
-            reader.readAsDataURL(fullAudioBlob);
-        };
-        
-        // Don't send partial chunks - collect all and send at once
-        mediaRecorder.start(10000); // Collect up to 10 seconds
-        mediaRecorderRef.current = mediaRecorder;
-        setIsRecording(true);
-        recordingStartTimeRef.current = Date.now();
-        addTranscriptMessage('system', '🎙️ Recording started - Audio will be processed when stopped');
-        
+            reader.onerror = (err) => {
+              console.error('❌ FileReader error:', err);
+            };
+            reader.readAsDataURL(event.data);
+          } else {
+            console.warn(`⚠️ Cannot send: ws=${ws?.readyState}, sessionId=${!!sessionId}, recording=${isRecordingRef.current}`);
+          }
+        }
+      };
+      
+      mediaRecorder.onerror = (event) => {
+        console.error('❌ MediaRecorder error:', event.error);
+      };
+      
+      mediaRecorder.onstart = () => {
+        console.log('✅ MediaRecorder started successfully');
+      };
+      
+      // Start recording with 3-second chunks
+      mediaRecorder.start(3000);
+      console.log('MediaRecorder.start() called with timeslice 3000ms');
+      
+      mediaRecorderRef.current = mediaRecorder;
+      setIsRecording(true);
+      isRecordingRef.current = true;
+      recordingStartTimeRef.current = Date.now();
+      
+      addTranscriptMessage('system', '🎙️ Recording started - Speaking detected');
+      
+      // Debug: Check every second if data is being collected
+      const interval = setInterval(() => {
+        if (isRecordingRef.current) {
+          console.log(`⏱️ Recording active for ${((Date.now() - recordingStartTimeRef.current) / 1000).toFixed(1)}s, chunks sent: ${chunkNumberRef.current}`);
+        } else {
+          clearInterval(interval);
+        }
+      }, 2000);
+      
     } catch (error) {
-        console.error('Microphone error:', error);
-        setMicError(error.message);
+      console.error('❌ Microphone error:', error);
+      setMicError(error.message);
+      addTranscriptMessage('system', `❌ Microphone error: ${error.message}`);
     }
   };
 
   const stopRecording = () => {
     console.log('⏹️ Stopping recording...');
     console.log('Current session ID:', sessionId);
+    console.log('Chunks sent:', chunkNumberRef.current);
     
     isRecordingRef.current = false;
     
-    // Collect all chunks from MediaRecorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-        mediaRecorderRef.current = null;
+      console.log('Stopping MediaRecorder...');
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
     }
     
     if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    
+    if (volumeIntervalRef.current) {
+      clearInterval(volumeIntervalRef.current);
+      volumeIntervalRef.current = null;
     }
     
     setIsRecording(false);
+    setVolume(0);
+    
+    if (chunkNumberRef.current === 0) {
+      addTranscriptMessage('system', '⚠️ No audio was captured. Please check microphone permissions and try again.');
+      setIsGenerating(false);
+      return;
+    }
+    
     setIsGenerating(true);
     
-    // Wait for the final audio chunk to be sent
+    // Wait for final chunks
     setTimeout(() => {
-        if (ws?.readyState === WebSocket.OPEN && sessionId) {
-            const endMsg = {
-                type: 'end_meeting',
-                session_id: sessionId,  // Use the correct session ID
-                timestamp: Date.now()
-            };
-            console.log('📝 Sending end_meeting:', endMsg);
-            ws.send(JSON.stringify(endMsg));
-            addTranscriptMessage('system', '📝 Generating minutes from transcript...');
-        } else {
-            console.error('Cannot send end_meeting - WebSocket state:', ws?.readyState, 'SessionId:', sessionId);
-        }
-    }, 2000);
+      if (ws?.readyState === WebSocket.OPEN && sessionId) {
+        const endMsg = {
+          type: 'end_meeting',
+          session_id: sessionId,
+          total_chunks: chunkNumberRef.current,
+          timestamp: Date.now()
+        };
+        console.log('📝 Sending end_meeting:', endMsg);
+        ws.send(JSON.stringify(endMsg));
+        addTranscriptMessage('system', `📝 Generating minutes from ${chunkNumberRef.current} audio chunks...`);
+      } else {
+        console.error('Cannot send end_meeting - WebSocket state:', ws?.readyState, 'SessionId:', sessionId);
+      }
+    }, 4000);
   };
 
   const clearMeeting = () => {
@@ -252,9 +304,15 @@ const connectWebSocket = useCallback(() => {
       streamRef.current = null;
     }
     
+    if (volumeIntervalRef.current) {
+      clearInterval(volumeIntervalRef.current);
+      volumeIntervalRef.current = null;
+    }
+    
     setIsRecording(false);
     setIsGenerating(false);
     setMicError(null);
+    setVolume(0);
     chunkNumberRef.current = 0;
     
     setTranscript([]);
@@ -297,7 +355,7 @@ const connectWebSocket = useCallback(() => {
           <div className="logo-section">
             <div className="logo">🎙️</div>
             <div>
-              <h1>MeetingPulse</h1>
+              <h1>meetingAiHackathon</h1>
               <p className="subtitle">Real-time meeting intelligence with audio streaming</p>
             </div>
           </div>
@@ -308,7 +366,7 @@ const connectWebSocket = useCallback(() => {
               <span>{isConnected ? 'Connected' : 'Connecting...'}</span>
             </div>
             <div className="model-badges">
-              <span className="badge">Whisper 74M</span>
+              <span className="badge">Whisper base.en (244M)</span>
               <span className="badge">Phi-3 3.8B</span>
               <span className="badge">Real-time Streaming</span>
             </div>
@@ -337,7 +395,7 @@ const connectWebSocket = useCallback(() => {
               {isRecording && (
                 <div className="recording-indicator">
                   <div className="recording-pulse"></div>
-                  <span>Streaming audio in real-time... (2s chunks)</span>
+                  <span>🎙️ Volume: {Math.round(volume * 100)}% | Streaming 3s chunks</span>
                 </div>
               )}
               
@@ -365,7 +423,7 @@ const connectWebSocket = useCallback(() => {
                   <div className="empty-state">
                     <div className="empty-icon">🎙️</div>
                     <p>Click "Start Meeting" to begin</p>
-                    <p className="empty-sub">Audio streams in 2-second chunks</p>
+                    <p className="empty-sub">Audio streams in 3-second chunks</p>
                   </div>
                 ) : (
                   transcript.map((item) => (
@@ -445,7 +503,7 @@ const connectWebSocket = useCallback(() => {
       <footer className="footer">
         <div className="footer-content">
           <p className="motto">🕊️ <em>"Build something that shouldn't work — but does."</em></p>
-          <p className="model-declaration">Models: Whisper Tiny (74M) + Phi-3-mini (3.8B) • Real-time streaming • Cost: $0.000/meeting</p>
+          <p className="model-declaration">Models: Whisper base.en (244M) + Phi-3-mini (3.8B) • Real-time streaming • Cost: $0.000/meeting</p>
         </div>
       </footer>
     </div>

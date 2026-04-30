@@ -2,7 +2,7 @@
 
 echo ""
 echo "════════════════════════════════════════════════════════"
-echo "📊 MeetingPulse Status"
+echo "📊 meetingAiHackathon Status"
 echo "════════════════════════════════════════════════════════"
 echo ""
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-command setup for any platform
 
-echo "🚀 MeetingPulse - Cross-Platform Setup"
+echo "🚀 meetingAiHackathon - Cross-Platform Setup"
 echo "======================================"
 
 # Check Docker

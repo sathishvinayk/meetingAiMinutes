@@ -3,7 +3,7 @@ set -e
 
 echo ""
 echo "════════════════════════════════════════════════════════"
-echo "🚀 MeetingPulse - ML Service Starting"
+echo "🚀 meetingAiHackathon - ML Service Starting"
 echo "════════════════════════════════════════════════════════"
 echo ""
 

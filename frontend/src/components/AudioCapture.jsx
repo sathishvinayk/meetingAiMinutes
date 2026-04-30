@@ -38,7 +38,7 @@ const AudioCapture = ({ isRecording, onRecordingStart, onRecordingStop, onAudioC
       onRecordingStart();
     } catch (error) {
       console.error('Microphone access error:', error);
-      alert('Please allow microphone access to use MeetingPulse');
+      alert('Please allow microphone access to use meetingAiHackathon');
     }
   };
 

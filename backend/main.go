@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	pb "meetingpulse/backend/pb"
+	pb "meetingAiHackathon/backend/pb"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
@@ -121,20 +121,28 @@ func (h *Hub) createStream(session *Session, shortID string) error {
 				return
 			}
 
-			log.Printf("📝 [%s] ML Transcription: '%s' (confidence: %.2f, final: %v)",
-				sid, resp.Text, resp.Confidence, resp.IsFinal)
+			// Use correct field names from protobuf
+			speaker := fmt.Sprintf("Speaker %d", resp.SpeakerId)
+			if speaker == "" {
+				speaker = "participant"
+			}
 
+			log.Printf("📝 [%s] ML Transcription: '%s' (confidence: %.2f, final: %v, speaker: %s)",
+				sid, resp.Text, resp.Confidence, resp.IsFinal, speaker)
+
+			// STORE ALL NON‑EMPTY TRANSCRIPTIONS (not only final ones)
 			s.mu.Lock()
-			if resp.IsFinal && resp.Text != "" && resp.Text != "🎤 Listening..." {
+			if resp.Text != "" && resp.Text != "🎤 Listening..." && resp.Text != "No speech detected" {
 				s.Transcript = append(s.Transcript, resp.Text)
 				log.Printf("✅ [%s] Added to transcript (total: %d entries)", sid, len(s.Transcript))
 			}
 			s.mu.Unlock()
 
+			// Forward to WebSocket client
 			err = s.Conn.WriteJSON(map[string]interface{}{
 				"type":       "transcription",
 				"text":       resp.Text,
-				"speaker":    fmt.Sprintf("Speaker %d", resp.SpeakerId),
+				"speaker":    speaker,
 				"confidence": resp.Confidence,
 				"is_final":   resp.IsFinal,
 			})

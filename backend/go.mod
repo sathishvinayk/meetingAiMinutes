@@ -1,4 +1,4 @@
-module meetingpulse/backend
+module meetingAiHackathon/backend
 
 go 1.21
 

@@ -43,7 +43,7 @@ const FloatingOverlay = ({ actionItems, onClose }) => {
       style={{ left: position.x, top: position.y }}
     >
       <div className="overlay-header" onMouseDown={handleMouseDown}>
-        <span>🎯 MeetingPulse Live</span>
+        <span>🎯 meetingAiHackathon Live</span>
         <button onClick={onClose} className="close-btn">×</button>
       </div>
       <div className="overlay-content">

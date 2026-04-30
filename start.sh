@@ -3,7 +3,7 @@
 
 set -e
 
-echo "🚀 MeetingPulse - Cross-Platform Launcher"
+echo "🚀 meetingAiHackathon - Cross-Platform Launcher"
 echo "========================================="
 
 # Detect platform
@@ -37,7 +37,7 @@ echo "📊 Service Status:"
 docker compose ps
 
 echo ""
-echo "✅ MeetingPulse is running!"
+echo "✅ meetingAiHackathon is running!"
 echo "🌐 Frontend: http://localhost:3000"
 echo "🔌 Backend API: http://localhost:8080"
 echo "💚 Health check: http://localhost:8080/health"
