@@ -133,7 +133,6 @@ function App() {
       console.log('✅ Microphone stream obtained');
       streamRef.current = stream;
       
-      // Setup volume meter
       const audioContext = new AudioContext();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
@@ -152,7 +151,6 @@ function App() {
         setVolume(max);
       }, 100);
       
-      // Check available MIME types
       const mimeTypes = ['audio/webm', 'audio/webm;codecs=opus', 'audio/mp4', 'audio/mpeg'];
       let mimeType = '';
       for (const type of mimeTypes) {
@@ -166,10 +164,9 @@ function App() {
       
       const mediaRecorder = new MediaRecorder(stream, {
         mimeType: mimeType,
-        audioBitsPerSecond: 64000  // Higher quality for better transcription
+        audioBitsPerSecond: 64000
       });
       
-      // Set up data handler BEFORE starting
       mediaRecorder.ondataavailable = (event) => {
         console.log(`📊 Data available event: size=${event.data.size}, state=${mediaRecorder.state}`);
         
@@ -212,7 +209,6 @@ function App() {
         console.log('✅ MediaRecorder started successfully');
       };
       
-      // Start recording with 3-second chunks
       mediaRecorder.start(3000);
       console.log('MediaRecorder.start() called with timeslice 3000ms');
       
@@ -223,7 +219,6 @@ function App() {
       
       addTranscriptMessage('system', '🎙️ Recording started - Speaking detected');
       
-      // Debug: Check every second if data is being collected
       const interval = setInterval(() => {
         if (isRecordingRef.current) {
           console.log(`⏱️ Recording active for ${((Date.now() - recordingStartTimeRef.current) / 1000).toFixed(1)}s, chunks sent: ${chunkNumberRef.current}`);
@@ -273,7 +268,6 @@ function App() {
     
     setIsGenerating(true);
     
-    // Wait for final chunks
     setTimeout(() => {
       if (ws?.readyState === WebSocket.OPEN && sessionId) {
         const endMsg = {
@@ -350,13 +344,17 @@ function App() {
 
   return (
     <div className="app">
+      <div className="glass-bg"></div>
+      
       <header className="header">
         <div className="header-content">
           <div className="logo-section">
-            <div className="logo">🎙️</div>
+            <div className="logo-glow">
+              <div className="logo">🎙️</div>
+            </div>
             <div>
-              <h1>meetingAiHackathon</h1>
-              <p className="subtitle">Real-time meeting intelligence with audio streaming</p>
+              <h1>meetingAi<span className="gradient-text">Hackathon</span></h1>
+              <p className="subtitle">Real-time meeting intelligence powered by weak AI</p>
             </div>
           </div>
           
@@ -366,9 +364,9 @@ function App() {
               <span>{isConnected ? 'Connected' : 'Connecting...'}</span>
             </div>
             <div className="model-badges">
-              <span className="badge">Whisper base.en (244M)</span>
-              <span className="badge">Phi-3 3.8B</span>
-              <span className="badge">Real-time Streaming</span>
+              <span className="badge whisper">🎤 Whisper base.en</span>
+              <span className="badge phi">🧠 Phi-3 3.8B</span>
+              <span className="badge realtime">⚡ Real-time Streaming</span>
             </div>
           </div>
         </div>
@@ -376,82 +374,99 @@ function App() {
 
       <main className="main">
         <div className="container">
-          <div className="controls-card">
+          <div className="controls-card glass-card">
             <div className="controls-content">
               <button 
                 className={`btn-record ${isRecording ? 'recording' : ''}`}
                 onClick={isRecording ? stopRecording : startRecording}
                 disabled={!isConnected || isGenerating}
               >
-                {isRecording ? '⏹️ End Meeting' : '🎤 Start Meeting'}
+                <span className="btn-icon">{isRecording ? '⏹️' : '🎤'}</span>
+                <span className="btn-text">{isRecording ? 'End Meeting' : 'Start Meeting'}</span>
+                {isRecording && <span className="recording-pulse-small"></span>}
               </button>
               
               {micError && (
                 <div className="error-message">
-                  ⚠️ {micError}
+                  <span>⚠️</span> {micError}
                 </div>
               )}
               
               {isRecording && (
                 <div className="recording-indicator">
                   <div className="recording-pulse"></div>
-                  <span>🎙️ Volume: {Math.round(volume * 100)}% | Streaming 3s chunks</span>
+                  <div className="volume-bar">
+                    <div className="volume-fill" style={{ width: `${Math.min(volume * 100, 100)}%` }}></div>
+                  </div>
+                  <span>🎙️ Volume: {Math.round(volume * 100)}% | 3s chunks</span>
                 </div>
               )}
               
               {isGenerating && (
                 <div className="generating-indicator">
                   <div className="spinner"></div>
-                  <span>Generating minutes from transcript...</span>
+                  <span>Generating AI minutes...</span>
                 </div>
               )}
               
               <button className="btn-clear" onClick={clearMeeting}>
-                Clear
+                <span>🗑️</span> Clear
               </button>
             </div>
           </div>
 
           <div className="two-columns">
-            <div className="column transcript-column">
+            <div className="column transcript-column glass-card">
               <div className="column-header">
-                <h2>📝 Live Transcript</h2>
+                <div className="header-icon">📝</div>
+                <h2>Live Transcript</h2>
                 <span className="message-count">{transcript.length} messages</span>
               </div>
               <div className="transcript-list">
                 {transcript.length === 0 ? (
                   <div className="empty-state">
                     <div className="empty-icon">🎙️</div>
-                    <p>Click "Start Meeting" to begin</p>
-                    <p className="empty-sub">Audio streams in 3-second chunks</p>
+                    <p>Ready to capture your meeting</p>
+                    <p className="empty-sub">Click "Start Meeting" and begin speaking</p>
                   </div>
                 ) : (
                   transcript.map((item) => (
                     <div key={item.id} className={`transcript-message ${item.speaker === 'system' ? 'system' : ''}`}>
-                      <div className="message-header">
-                        <span className="message-speaker">{item.speaker}</span>
-                        <span className="message-time">{item.timestamp}</span>
+                      <div className="message-avatar">
+                        {item.speaker === 'system' ? '🤖' : '👤'}
                       </div>
-                      <div className="message-text">{item.text}</div>
+                      <div className="message-content">
+                        <div className="message-header">
+                          <span className="message-speaker">{item.speaker === 'system' ? 'System' : 'You'}</span>
+                          <span className="message-time">{item.timestamp}</span>
+                        </div>
+                        <div className="message-text">{item.text}</div>
+                      </div>
                     </div>
                   ))
                 )}
               </div>
             </div>
 
-            <div className="column insights-column">
+            <div className="column insights-column glass-card">
               <div className="column-header">
-                <h2>📊 Meeting Insights</h2>
+                <div className="header-icon">📊</div>
+                <h2>Meeting Insights</h2>
               </div>
               
               <div className="insights-list">
                 <div className="insight-card sentiment-card" style={{ borderLeftColor: getSentimentColor() }}>
                   <div className="card-header">
                     <span className="card-icon">📊</span>
-                    <h3>Sentiment</h3>
+                    <h3>Sentiment Analysis</h3>
                   </div>
                   <div className="sentiment-value" style={{ color: getSentimentColor() }}>
                     {getSentimentEmoji()} {sentiment.toUpperCase()}
+                  </div>
+                  <div className="sentiment-bar">
+                    <div className="sentiment-fill positive" style={{ width: sentiment === 'positive' ? '100%' : sentiment === 'neutral' ? '50%' : '0%' }}></div>
+                    <div className="sentiment-fill neutral" style={{ width: sentiment === 'neutral' ? '100%' : '50%' }}></div>
+                    <div className="sentiment-fill negative" style={{ width: sentiment === 'negative' ? '100%' : '0%' }}></div>
                   </div>
                 </div>
 
@@ -494,6 +509,24 @@ function App() {
                     )}
                   </ul>
                 </div>
+
+                {discussionPoints.length > 0 && (
+                  <div className="insight-card">
+                    <div className="card-header">
+                      <span className="card-icon">💬</span>
+                      <h3>Discussion Points</h3>
+                      <span className="item-count">{discussionPoints.length}</span>
+                    </div>
+                    <ul className="insight-list">
+                      {discussionPoints.map((point, idx) => (
+                        <li key={idx}>
+                          <span className="bullet">•</span>
+                          <span>{point}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -503,7 +536,13 @@ function App() {
       <footer className="footer">
         <div className="footer-content">
           <p className="motto">🕊️ <em>"Build something that shouldn't work — but does."</em></p>
-          <p className="model-declaration">Models: Whisper base.en (244M) + Phi-3-mini (3.8B) • Real-time streaming • Cost: $0.000/meeting</p>
+          <div className="model-stats">
+            <span>Whisper base.en (244M)</span>
+            <span className="separator">•</span>
+            <span>Phi-3-mini (3.8B)</span>
+            <span className="separator">•</span>
+            <span>Zero Cost • Privacy First</span>
+          </div>
         </div>
       </footer>
     </div>
