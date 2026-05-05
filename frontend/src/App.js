@@ -34,7 +34,7 @@ function App() {
 
   const connectWebSocket = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const websocket = new WebSocket(`${protocol}//140.245.219.242:8080/ws`);
+    const websocket = new WebSocket(`ws://140.245.219.242:8080/ws`);
     
     websocket.onopen = () => {
       console.log('✅ WebSocket connected, waiting for session_id...');
