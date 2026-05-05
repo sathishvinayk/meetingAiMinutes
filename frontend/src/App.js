@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 
 function App() {
+  const [isClearing, setIsClearing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState([]);
   const [actionItems, setActionItems] = useState([]);
@@ -319,6 +320,8 @@ function App() {
   };
 
   const clearMeeting = () => {
+    if (isClearing) return; // Prevent multiple clears
+    setIsClearing(true);
     console.log('🧹 Clearing meeting...');
     isRecordingRef.current = false;
     
@@ -360,7 +363,8 @@ function App() {
     // Reconnect WebSocket
     setTimeout(() => {
       connectWebSocket();
-    }, 500);
+      setIsClearing(false);
+    }, 2000);
     
     addTranscriptMessage('system', '🔄 Meeting cleared. Ready for new meeting.');
   };
@@ -446,9 +450,8 @@ function App() {
                   <div className="spinner"></div>
                   <span>Generating AI minutes...</span>
                 </div>
-              )}
-              
-              <button className="btn-clear" onClick={clearMeeting}>
+              )}              
+              <button className="btn-clear" onClick={clearMeeting} disabled={isClearing}>
                 <span>🗑️</span> Clear
               </button>
             </div>
