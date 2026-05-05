@@ -9,7 +9,7 @@ function App() {
   const [discussionPoints, setDiscussionPoints] = useState([]);
   const [sentiment, setSentiment] = useState('neutral');
   const [sessionId, setSessionId] = useState(null);
-  const [ws, setWs] = useState(null);
+  const [ws, setWs] = useState(null); // Remove this line since we use wsRef
   const [isConnected, setIsConnected] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [micError, setMicError] = useState(null);
@@ -20,6 +20,7 @@ function App() {
   const chunkNumberRef = useRef(0);
   const isRecordingRef = useRef(false);
   const volumeIntervalRef = useRef(null);
+  const wsRef = useRef(null); // Add this to track WebSocket consistently
 
   const addTranscriptMessage = useCallback((speaker, text) => {
     setTranscript(prev => [...prev, {
@@ -86,17 +87,23 @@ function App() {
     websocket.onclose = (event) => {
       console.log('WebSocket disconnected:', event.code, event.reason);
       setIsConnected(false);
-      setTimeout(() => connectWebSocket(), 3000);
     };
     
+    wsRef.current = websocket;
     setWs(websocket);
     return websocket;
   }, [addTranscriptMessage]);
 
+  // Single useEffect for initialization and cleanup
   useEffect(() => {
-    const socket = connectWebSocket();
+    // Initial connection
+    connectWebSocket();
+    
+    // Cleanup function
     return () => {
-      if (socket) socket.close();
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -104,18 +111,40 @@ function App() {
         clearInterval(volumeIntervalRef.current);
       }
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket]); // Empty dependency array - only run once on mount
 
   const startRecording = async () => {
     setMicError(null);
     chunkNumberRef.current = 0;
     
     console.log('🎤 startRecording called, sessionId:', sessionId);
-    console.log('WebSocket state:', ws?.readyState);
+    console.log('WebSocket state:', wsRef.current?.readyState);
     
+    // If no session ID, wait for it
     if (!sessionId) {
-      console.error('❌ No session ID! Wait for WebSocket connection.');
-      addTranscriptMessage('system', '❌ Waiting for connection... Please try again.');
+      console.log('⏳ Waiting for session ID...');
+      addTranscriptMessage('system', '⏳ Connecting to server...');
+      
+      // Wait for session ID to be set
+      let attempts = 0;
+      const waitForSession = setInterval(() => {
+        attempts++;
+        if (sessionId) {
+          clearInterval(waitForSession);
+          console.log('✅ Session ID received, starting recording...');
+          startRecording();
+        } else if (attempts > 20) {
+          clearInterval(waitForSession);
+          addTranscriptMessage('system', '❌ Connection timeout. Please refresh the page.');
+        }
+      }, 500);
+      return;
+    }
+    
+    // Check WebSocket state
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.error('❌ WebSocket not open. State:', wsRef.current?.readyState);
+      addTranscriptMessage('system', '❌ Connection lost. Please clear and try again.');
       return;
     }
     
@@ -173,7 +202,8 @@ function App() {
         if (event.data.size > 0) {
           console.log(`✅ Got audio data: ${event.data.size} bytes`);
           
-          if (ws?.readyState === WebSocket.OPEN && sessionId && isRecordingRef.current) {
+          const currentWs = wsRef.current;
+          if (currentWs?.readyState === WebSocket.OPEN && sessionId && isRecordingRef.current) {
             chunkNumberRef.current++;
             console.log(`📤 Sending chunk ${chunkNumberRef.current}, size: ${event.data.size}`);
             
@@ -189,14 +219,14 @@ function App() {
                 timestamp: Date.now()
               };
               console.log(`📨 Sending message type: ${message.type}, chunk: ${message.chunk}`);
-              ws.send(JSON.stringify(message));
+              currentWs.send(JSON.stringify(message));
             };
             reader.onerror = (err) => {
               console.error('❌ FileReader error:', err);
             };
             reader.readAsDataURL(event.data);
           } else {
-            console.warn(`⚠️ Cannot send: ws=${ws?.readyState}, sessionId=${!!sessionId}, recording=${isRecordingRef.current}`);
+            console.warn(`⚠️ Cannot send: ws=${currentWs?.readyState}, sessionId=${!!sessionId}, recording=${isRecordingRef.current}`);
           }
         }
       };
@@ -268,8 +298,10 @@ function App() {
     
     setIsGenerating(true);
     
+    // Wait for final chunks to be processed
     setTimeout(() => {
-      if (ws?.readyState === WebSocket.OPEN && sessionId) {
+      const currentWs = wsRef.current;
+      if (currentWs?.readyState === WebSocket.OPEN && sessionId) {
         const endMsg = {
           type: 'end_meeting',
           session_id: sessionId,
@@ -277,15 +309,17 @@ function App() {
           timestamp: Date.now()
         };
         console.log('📝 Sending end_meeting:', endMsg);
-        ws.send(JSON.stringify(endMsg));
+        currentWs.send(JSON.stringify(endMsg));
         addTranscriptMessage('system', `📝 Generating minutes from ${chunkNumberRef.current} audio chunks...`);
       } else {
-        console.error('Cannot send end_meeting - WebSocket state:', ws?.readyState, 'SessionId:', sessionId);
+        console.error('Cannot send end_meeting - WebSocket state:', currentWs?.readyState, 'SessionId:', sessionId);
+        setIsGenerating(false);
       }
-    }, 4000);
+    }, 3000);
   };
 
   const clearMeeting = () => {
+    console.log('🧹 Clearing meeting...');
     isRecordingRef.current = false;
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
@@ -315,10 +349,15 @@ function App() {
     setDiscussionPoints([]);
     setSentiment('neutral');
     
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
+    // Close existing WebSocket if open
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
     }
     
+    // Reset session ID
+    setSessionId(null);
+    
+    // Reconnect WebSocket
     setTimeout(() => {
       connectWebSocket();
     }, 500);
